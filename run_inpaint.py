@@ -25,6 +25,7 @@ root_path = "check_points/ref_guided_inpainting"
 repeat_sp_token = 50
 sp_token = "<special-token>"
 
+import subprocess
 
 
 
@@ -85,7 +86,7 @@ def make_batch_sd(
     return batch
 
 
-def inpaint(sampler, image, mask, prompt, seed, scale, ddim_steps, num_samples=1, w=512, h=512):
+def inpaint(sampler, image, mask, prompt, seed, scale, ddim_steps, num_samples=1, w=512, h=512, strength=None, eta=0.0):
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = sampler.model
 
@@ -93,15 +94,15 @@ def inpaint(sampler, image, mask, prompt, seed, scale, ddim_steps, num_samples=1
 
     prng = np.random.RandomState(seed)
     start_code = prng.randn(num_samples, 4, h // 8, w // 8) # start code目前是純noise
-    # TODO: Change here
-    # Add a encoder here, and add noise to image, 到我們要的strength
     
     start_code = torch.from_numpy(start_code).to(
         device=device, dtype=torch.float32)
-
+    
+    
+    
+    
     with torch.no_grad(), torch.autocast("cuda"):
-        batch = make_batch_sd(image, mask, txt=prompt,
-                              device=device, num_samples=num_samples)
+        batch = make_batch_sd(image, mask, txt=prompt, device=device, num_samples=num_samples)
         print(batch['image'].shape)
         c = model.cond_stage_model.encode(batch["txt"])
 
@@ -125,19 +126,23 @@ def inpaint(sampler, image, mask, prompt, seed, scale, ddim_steps, num_samples=1
         uc_full = {"c_concat": [c_cat], "c_crossattn": [uc_cross]}
 
         shape = [model.channels, h // 8, w // 8]
-        # TODO: change to sample.decode 現在都是全random強度denoise
+        
+        # TODO: encode image to latent (w // 8, h // 8), replace start_code with below latent (need to add noise inside sample)
+        if strength is not None:
+            start_code = model.get_first_stage_encoding(model.encode_first_stage(batch["image"]))
+
         samples_cfg, intermediates = sampler.sample(
             ddim_steps,
             num_samples,
             shape,
             cond,
             verbose=False,
-            eta=1.0,
+            eta=eta,
             unconditional_guidance_scale=scale,
             unconditional_conditioning=uc_full,
             x_T=start_code, 
+            strength=strength
         )
-        # 
         x_samples_ddim = model.decode_first_stage(samples_cfg)
         pred = x_samples_ddim * batch['mask'] + batch['image'] * (1 - batch['mask'])
 
@@ -155,7 +160,7 @@ def pad_image(input_image):
     im_padded = Image.fromarray(np.pad(np.array(input_image), ((0, pad_h), (0, pad_w), (0, 0)), mode='edge'))
     return im_padded
 
-def predict(source, reference, ddim_steps, num_samples, scale, seed):
+def predict(source, reference, ddim_steps, num_samples, scale, seed, strength=None, eta=0.0):
     source_img = source["image"].convert("RGB")
     origin_w, origin_h = source_img.size
     ratio = origin_h / origin_w
@@ -212,7 +217,9 @@ def predict(source, reference, ddim_steps, num_samples, scale, seed):
         scale=scale,
         ddim_steps=ddim_steps,
         num_samples=num_samples,
-        h=height, w=width
+        h=height, w=width,
+        strength=strength,
+        eta=eta
     )
     # breakpoint()
     # result = [r.resize((int(512 / ratio), 512), resample=Image.Resampling.BICUBIC) for r in result]
@@ -223,27 +230,182 @@ def predict(source, reference, ddim_steps, num_samples, scale, seed):
     return result
 
 
-if __name__ == "__main__":
-    # parser = argparse.ArgumentParser(description='Your description here')
-    # parser.add_argument('--dataset', type=str, choice=['bear', 'kitchen'])
-    # args = parser.parse_args()
+def LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root, strength=None):
+    ref_img = Image.open(ref_img_path)
+    num_image = len(os.listdir(source_root))
+    ref_list = natsorted(os.listdir(ref_root))
+    source_list = natsorted(os.listdir(source_root))
+    mask_list = natsorted(os.listdir(mask_root))
+    
+    ref_img.save(os.path.join(output_root, ref_list[0]))
+    for i in range(1, num_image):
+        source_img = Image.open(os.path.join(source_root, source_list[i]))
+        mask_img = Image.open(os.path.join(mask_root, mask_list[i]))
+        source = {"image": source_img, "mask": mask_img}
+        result = predict(source, ref_img, ddim_steps=50, num_samples=1, scale=2.5, seed=random.randint(0, 147483647), strength=strength, eta=1.0) # strength=None(No SD Edit)
+        result[0].save(os.path.join(output_root, ref_list[i]))
+  
+def GsRender(scene, port=4455):      
+    # run gaussian-splatting w/ strength 0.25
+    base_env = os.environ.copy()
+    conda_env_path = "/home/kkennethwu/anaconda3/envs/surfel_splatting"
+    base_env["PATH"] = f"{conda_env_path}/bin:" + base_env["PATH"]
+    base_env["CONDA_PREFIX"] = conda_env_path
+    
+    _2dgs_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting"
+    command = f"""
+                python train_fintune.py -s data/{scene}_leftrefill/ \
+                -m output/{scene}_leftrefill_lpips --images leftrefill \
+                --start_checkpoint /home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/{scene}_incomplete/chkpnt30000.pth \
+                --iteration 40000 --save_iterations 40000 \
+                --checkpoint_iteration 40000 \
+                --test_iterations 40000 --lambda_dssim 0.5 \
+                --port {port} &&
+                python render.py -s data/{scene}_leftrefill/ -m output/{scene}_leftrefill_lpips --skip_mesh"""
+    
+    
+    process = subprocess.Popen(command, shell=True, executable='/bin/bash', env=base_env, cwd=_2dgs_root)
+    stdout, stderror = process.communicate()
+    print(process.returncode)
+    print(stdout)
+    print(stderror)
+    if process.returncode != 0:
+        print("Error in running gaussian-splatting")
+        exit(1)
+        
+def GsRender_strength(scene, strength, port=4455):
+    # run gaussian-splatting w/ strength 0.25
+    base_env = os.environ.copy()
+    conda_env_path = "/home/kkennethwu/anaconda3/envs/surfel_splatting"
+    base_env["PATH"] = f"{conda_env_path}/bin:" + base_env["PATH"]
+    base_env["CONDA_PREFIX"] = conda_env_path
+    
+    _2dgs_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting"
+    command = f"""
+                python train_fintune.py -s data/{scene}_leftrefill/ \
+                -m output/{scene}_leftrefill_s{strength}_lpips --images leftrefill \
+                --start_checkpoint /home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/{scene}_incomplete/chkpnt30000.pth \
+                --iteration 40000 --save_iterations 40000 \
+                --checkpoint_iteration 40000 \
+                --test_iterations 40000  \
+                --port {port} && \
+                python render.py -s data/{scene}_leftrefill/ -m output/{scene}_leftrefill_s{strength}_lpips --skip_mesh""" 
+    process = subprocess.Popen(command, shell=True, executable='/bin/bash', env=base_env, cwd=_2dgs_root)
+    stdout, stderror = process.communicate()
+    print(process.returncode)
+    print(stdout)
+    print(stderror)
+    if process.returncode != 0:
+        print("Error in running gaussian-splatting")
+        exit(1)
+
+
+
+if __name__ == "__main__":    
+    # #################### Bear ####################
+    # #### Stage1: Leftrefill on incomplete + GS Render #####
+    # ref_img_path = "./output_scene/bear/00000.png"
+    # # source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/bear_incomplete/train/ours_30000/renders/"
+    # source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/bear_incomplete_isMasked_3dim_detach_nomeanloss/train/ours_30000_object_removal/renders/"
+    # ref_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/images_inpaint_unseen/"
+    # mask_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/inpaint_2d_unseen_mask_great/"
+    # output_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/leftrefill"
+    # output_root = "./output_scene/bear/leftrefill"
+    # if not os.path.exists(output_root):
+    #     print("output_root not exist, create one")
+    #     os.makedirs(output_root)
+    # # breakpoint()
+        
+    # LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root)
+    # GsRender(scene="bear")
+    
+    # ##### Stage2: Start LeftRefill SDEdit + GS Render #####``
+    # source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/bear_leftrefill_lpips/train/ours_40000/renders/"
+    
+    # # for strength in [0.99, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]:
+    # for strength in [0.75, 0.5, 0.25]:
+    #     # SDEdit
+    #     LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root, strength)
+    
+    #     # run gaussian-splatting w/ strength 0.25
+    #     GsRender_strength("bear", strength)
+    #     # update leftrefefill source path
+    #     source_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/bear_leftrefill_s{strength}/train/ours_40000/renders/"
+    # breakpoint()
+    #################### Kitchen ####################
+    ref_img_path = "./output_scene/kitchen/00000.png"
+    # source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/kitchen_incomplete/train/ours_30000/renders"
+    source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/kitchen_incomplete_isMasked_3dim_detach_nomeanloss/train/ours_30000_object_removal/renders/"
+    ref_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/kitchen/images_inpaint_unseen/"
+    mask_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/kitchen/inpaint_2d_unseen_mask/"
+    output_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/kitchen/leftrefill"
+    output_root = "./output_scene/kitchen/leftrefill"
+    if not os.path.exists(output_root):
+        print("output_root not exist, create one")
+        os.makedirs(output_root)
+    LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root)
+    # GsRender(scene="kitchen", port=4773)
+    breakpoint()
+    # ##### Stage2: Start LeftRefill SDEdit + GS Render #####``
+    # source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/kitchen_leftrefill_lpips/train/ours_40000/renders/"
+    
+    # # for strength in [0.99, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]:
+    # for strength in [0.75, 0.5, 0.25]:
+    #     # SDEdit
+    #     LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root, strength)
+    
+    #     # run gaussian-splatting w/ strength 0.25
+    #     GsRender_strength("kitchen", strength, port=4773)
+    #     # update leftrefefill source path
+    #     source_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/kitchen_leftrefill_s{strength}/train/ours_40000/renders/"
+    # breakpoint()
+
+    
+    
+    
     
     # if args.dataset == 'bear':
-        # ##### Bear #####
-        # ref_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/images_inpaint_unseen/"
-        # mask_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/inpaint_2d_unseen_mask/"
-        # source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/bear_incomplete/train/ours_30000/renders/"
-        # ref_img = Image.open("frame_00001.jpg")
-        # output_root = "./result_bear1/"
+    # ##### Bear #####
+    # ref_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/images_inpaint_unseen/"
+    # mask_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/inpaint_2d_unseen_mask/"
+    # source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/bear_incomplete/train/ours_30000/renders/"
+    # ref_img = Image.open("frame_00001.jpg")
+    # output_root = "./result_bear1/"
         
-    # if args.dataset == 'kitchen':
-    ##### Kitchen #####
-    ref_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/kitchen/images_inpaint_unseen"
-    mask_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/kitchen/inpaint_object_mask_255_final/"
-    source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/kitchen_incomplete/train/ours_30000/renders"
-    ref_img = Image.open("DSCF0656_ori_cleanup.JPG")
-    output_root = "./result_kitchen1/"
+    # # if args.dataset == 'kitchen':
+    # ##### Kitchen #####
+    # ref_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/kitchen/images_inpaint_unseen"
+    # mask_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/kitchen/inpaint_object_mask_255_final/"
+    # source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/kitchen_incomplete/train/ours_30000/renders"
+    # ref_img = Image.open("DSCF0656_ori_cleanup.JPG")
+    # output_root = "./result_kitchen1/"
 
+    # ##### Add strength * noise : Bear #####
+    # ref_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/images_inpaint_unseen/"
+    # mask_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/inpaint_2d_unseen_mask/"
+    # source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/bear_leftrefill/train/ours_30000/renders/"
+    # ref_img = Image.open("frame_00001.jpg")
+    # output_root = "./result_bear1_1train/"
+
+    
+    # num_image = len(os.listdir(source_root))
+    
+    # ref_list = natsorted(os.listdir(ref_root))
+    # source_list = natsorted(os.listdir(source_root))
+    # mask_list = natsorted(os.listdir(mask_root))
+    
+    
+    
+    ##### Original Left Refill #####
+    ##### Bear #####
+    ref_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/images_inpaint_unseen/"
+    mask_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/inpaint_2d_unseen_mask/"
+    source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/bear_incomplete/train/ours_30000/renders/"
+    ref_img = Image.open("frame_00001.jpg")
+    output_root = "./result_bear1_scale3.5/"
+    if not os.path.exists(output_root):
+            print("output_root not exist, create one")
+            os.makedirs(output_root)  
     
     num_image = len(os.listdir(source_root))
     
@@ -251,15 +413,57 @@ if __name__ == "__main__":
     source_list = natsorted(os.listdir(source_root))
     mask_list = natsorted(os.listdir(mask_root))
     
-    
-    
-    
     for i in range(1, num_image):
         source_img = Image.open(os.path.join(source_root, source_list[i]))
         mask_img = Image.open(os.path.join(mask_root, mask_list[i]))
         source = {"image": source_img, "mask": mask_img}
-        result = predict(source, ref_img, ddim_steps=50, num_samples=1, scale=2.5, seed=random.randint(0, 147483647))
+        result = predict(source, ref_img, ddim_steps=50, num_samples=1, scale=3.5, seed=random.randint(0, 147483647))
         result[0].save(f"{output_root}"+ref_list[i])
         # ref_img = result[0]
         # breakpoint()
+        
+    # ##### GS Render + LeftRefill #####
+    # ##### Add strength * noise : Bear #####
+    # ref_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/images_inpaint_unseen/"
+    # mask_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/inpaint_2d_unseen_mask/"
+    # source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/bear_leftrefill/train/ours_30000/renders/"
+    # ref_img = Image.open("frame_00001.jpg")
+    # output_root = "./result_bear1_1train/"
+    # num_image = len(os.listdir(source_root))
+    
+    # ref_list = natsorted(os.listdir(ref_root))
+    # source_list = natsorted(os.listdir(source_root))
+    # mask_list = natsorted(os.listdir(mask_root))
+    # for i in range(1, num_image):
+    #     source_img = Image.open(os.path.join(source_root, source_list[i]))
+    #     mask_img = Image.open(os.path.join(mask_root, mask_list[i]))
+    #     source = {"image": source_img, "mask": mask_img}
+    #     result = predict(source, ref_img, ddim_steps=50, num_samples=1, scale=5.0, seed=random.randint(0, 147483647))
+    #     result[0].save(f"{output_root}"+ref_list[i])
+     
+        
+        
+    # ##### SD Edit strength #####
+    # for strength in [0.02, 0.25, 0.5, 0.75, 0.99]:
+    #     ref_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/images_inpaint_unseen/"
+    #     mask_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/bear/inpaint_2d_unseen_mask/"
+    #     source_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/bear_leftrefill/train/ours_30000/renders/"
+    #     ref_img = Image.open("frame_00001.jpg")
+    #     output_root = f"./result_bear1_train_strength{strength}/"
+    #     if not os.path.exists(output_root):
+    #         print("output_root not exist, create one")
+    #         os.makedirs(output_root)
+        
+            
+    #     num_image = len(os.listdir(source_root))
+    
+    #     ref_list = natsorted(os.listdir(ref_root))
+    #     source_list = natsorted(os.listdir(source_root))
+    #     mask_list = natsorted(os.listdir(mask_root))
+    #     for i in range(1, num_image):
+    #         source_img = Image.open(os.path.join(source_root, source_list[i]))
+    #         mask_img = Image.open(os.path.join(mask_root, mask_list[i]))
+    #         source = {"image": source_img, "mask": mask_img}
+    #         result = predict(source, ref_img, ddim_steps=50, num_samples=1, scale=2.5, seed=random.randint(0, 147483647), strength=strength)
+    #         result[0].save(f"{output_root}"+ref_list[i])
     

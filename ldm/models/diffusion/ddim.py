@@ -77,6 +77,7 @@ class DDIMSampler(object):
                ucg_schedule=None,
                **kwargs
                ):
+        # Step 1
         if conditioning is not None:
             if isinstance(conditioning, dict):
                 ctmp = conditioning[list(conditioning.keys())[0]]
@@ -95,6 +96,22 @@ class DDIMSampler(object):
             #         print(f"Warning: Got {conditioning.shape[0]} conditionings but batch-size is {batch_size}")
 
         self.make_schedule(ddim_num_steps=S, ddim_eta=eta, verbose=verbose)
+        
+        
+        # TODO: add strength * noise to X_T
+        strength = kwargs.get('strength', None)
+        t_enc = None
+        if strength is not None:
+            print("strengh: ", strength)
+            # strength = 0.02
+            t_enc = int(strength * S)
+            batch_size = 1
+            x_T = self.stochastic_encode(x_T, torch.tensor([t_enc] * batch_size).to(self.model.betas.device))
+        
+        # adjust ddim timesteps w/ strength
+        # timesteps = self.ddim_timesteps[:, t_enc]
+        # breakpoint()
+        
         # sampling
         C, H, W = shape
         size = (batch_size, C, H, W)
@@ -135,6 +152,7 @@ class DDIMSampler(object):
                                      unconditional_conditioning=unconditional_conditioning,
                                      dynamic_threshold=dynamic_threshold,
                                      ucg_schedule=ucg_schedule,
+                                     timesteps=t_enc, # accoroding to strength of the noise
                                      **kwargs)
         if kwargs.get('return_attn', False):
             samples, intermediates, att_scores = res
@@ -239,14 +257,13 @@ class DDIMSampler(object):
         if timesteps is None:
             timesteps = self.ddpm_num_timesteps if ddim_use_original_steps else self.ddim_timesteps
         elif timesteps is not None and not ddim_use_original_steps:
-            subset_end = int(min(timesteps / self.ddim_timesteps.shape[0], 1) * self.ddim_timesteps.shape[0]) - 1
+            subset_end = int(min(timesteps / self.ddim_timesteps.shape[0], 1) * self.ddim_timesteps.shape[0]) # encode timestep有37個, decode也要有37個
             timesteps = self.ddim_timesteps[:subset_end]
-
         intermediates = {'x_inter': [img], 'pred_x0': [img]}
         time_range = reversed(range(0, timesteps)) if ddim_use_original_steps else np.flip(timesteps)
         total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
         # print(f"Running DDIM Sampling with {total_steps} timesteps")
-
+        print(time_range)
         iterator = tqdm(time_range, desc='DDIM Sampler', total=total_steps, disable=True)
 
         att_scores = None
@@ -307,6 +324,8 @@ class DDIMSampler(object):
                       unconditional_guidance_scale=1., unconditional_conditioning=None,
                       dynamic_threshold=None, **kwargs):
         b, *_, device = *x.shape, x.device
+        # Step 3
+        
 
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
             if kwargs.get('return_attn', False):
@@ -314,9 +333,11 @@ class DDIMSampler(object):
             else:
                 model_output = self.model.apply_model(x, t, c, **kwargs)
         else:
+            # Step 4
             x_in = torch.cat([x] * 2)
             t_in = torch.cat([t] * 2)
             if isinstance(c, dict):
+                # Step 5
                 assert isinstance(unconditional_conditioning, dict)
                 c_in = dict()
                 for k in c:
@@ -339,6 +360,7 @@ class DDIMSampler(object):
                     a_uncond, a_cond = a.chunk(2)
                     att_scores.append(a_uncond + unconditional_guidance_scale * (a_cond - a_uncond))
             else:
+                # Step 6
                 model_uncond, model_t = self.model.apply_model(x_in, t_in, c_in).chunk(2)
             model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
 
@@ -372,14 +394,12 @@ class DDIMSampler(object):
 
         if dynamic_threshold is not None:
             raise NotImplementedError()
-
         # direction pointing to x_t
         dir_xt = (1. - a_prev - sigma_t ** 2).sqrt() * e_t
         noise = sigma_t * noise_like(x.shape, device, repeat_noise) * temperature
         if noise_dropout > 0.:
             noise = torch.nn.functional.dropout(noise, p=noise_dropout)
         x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
-
         if kwargs.get('return_attn', False):
             return x_prev, pred_x0, att_scores
         else:
