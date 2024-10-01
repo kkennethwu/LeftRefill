@@ -26,6 +26,7 @@ repeat_sp_token = 50
 sp_token = "<special-token>"
 
 import subprocess
+from tqdm import tqdm
 
 
 
@@ -221,7 +222,8 @@ def predict(source, reference, ddim_steps, num_samples, scale, seed, strength=No
         strength=strength,
         eta=eta
     )
-    # breakpoint()
+    
+
     # result = [r.resize((int(512 / ratio), 512), resample=Image.Resampling.BICUBIC) for r in result]
     result = [r.resize((int(origin_w), origin_h), resample=Image.Resampling.BICUBIC) for r in result]
     for r in result:
@@ -238,12 +240,20 @@ def LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root, stre
     mask_list = natsorted(os.listdir(mask_root))
     
     ref_img.save(os.path.join(output_root, ref_list[0]))
-    for i in range(1, num_image):
+    for i in tqdm(range(1, num_image)):
         source_img = Image.open(os.path.join(source_root, source_list[i]))
         mask_img = Image.open(os.path.join(mask_root, mask_list[i]))
         source = {"image": source_img, "mask": mask_img}
         result = predict(source, ref_img, ddim_steps=50, num_samples=1, scale=2.5, seed=random.randint(0, 147483647), strength=strength, eta=1.0) # strength=None(No SD Edit)
-        result[0].save(os.path.join(output_root, ref_list[i]))
+        
+        mask_img_np = np.array(mask_img)
+        result_img_np = np.array(result[0])
+        source_img_np = np.array(source_img)
+        result_img_np[mask_img_np == 0] = source_img_np[mask_img_np == 0]
+        result_img = Image.fromarray(result_img_np)
+        
+        
+        result_img.save(os.path.join(output_root, ref_list[i]))
   
 def GsRender(scene, port=4455):      
     # run gaussian-splatting w/ strength 0.25
@@ -302,6 +312,63 @@ def GsRender_strength(scene, strength, port=4455):
 
 
 if __name__ == "__main__":    
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument('--dataset', '-d', type=str, default='bear', help='dataset name')
+    argparser.add_argument('--scene', '-s', type=str, default='bear', help='scene name')
+    argparser.add_argument('--script', type=str, choices=['benchmark', 'ours', 'sdedit'], default='ours', help='script to run')
+    argparser.add_argument('--strength', type=float, default=0.5, help='strength for sdedit')
+    args = argparser.parse_args()
+    
+    if args.dataset == 'bear':
+        dataset_name = "."
+    elif args.dataset == '360':
+        dataset_name = "360v2_with_masks"
+    elif args.dataset == 'our':
+        dataset_name = "our_dataset"
+    scene_name = args.scene
+    
+
+    if args.script == 'ours':
+        #### Stage1: Leftrefill on incomplete + GS Render #####
+        ref_img_path = f"./{dataset_name}/{scene_name}/00000.png"
+        source_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/images_removal/"
+        ref_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/images/"
+        mask_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/unseen_mask/"
+        # output_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/our_dataset/plant/leftrefill"
+        output_root = f"./{dataset_name}/{scene_name}/leftrefill"
+        if not os.path.exists(output_root):
+            print("output_root not exist, create one")
+            os.makedirs(output_root)
+        # breakpoint()
+            
+        LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root)
+        os.system(f"cp -r {output_root} /home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/")
+        
+    elif args.script == 'benchmark':
+        #### Stage1: Leftrefill on incomplete + GS Render #####
+        ref_img_path = f"./{dataset_name}/{scene_name}/00000.png"
+        source_root = f"/project/gs-inpainting/data/{dataset_name}/{scene_name}/test_images_rend/"
+        ref_root = f"/project/gs-inpainting/data/{dataset_name}/{scene_name}/test_images/"
+        mask_root = f"/project/gs-inpainting/data/{dataset_name}/{scene_name}/test_object_masks/"
+        output_root = f"/project/gs-inpainting/benchmark/LeftRefill/LeftRefillOnTestView/{dataset_name}/{scene_name}"
+        if not os.path.exists(output_root):
+            print("output_root not exist, create one")
+            os.makedirs(output_root)
+        LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root)
+   
+    elif args.script == 'sdedit':
+        strength = args.strength
+        ref_img_path = f"./{dataset_name}/{scene_name}/00000.png"
+        source_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/{dataset_name}/{scene_name}/exp1/train/ours_10000_object_inpaint/renders/"
+        ref_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/images/"
+        mask_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/unseen_mask/"
+        output_root = f"./home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/leftrefill_{strength}/"
+        if not os.path.exists(output_root):
+            print("output_root not exist, create one")
+            os.makedirs(output_root)
+        LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root, strength)
+        # GsRender_strength(scene=scene_name, port=4773)
+    exit()
     # #################### Bear ####################
     # #### Stage1: Leftrefill on incomplete + GS Render #####
     # ref_img_path = "./output_scene/bear/00000.png"
