@@ -239,8 +239,9 @@ def LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root, stre
     source_list = natsorted(os.listdir(source_root))
     mask_list = natsorted(os.listdir(mask_root))
     
-    ref_img.save(os.path.join(output_root, ref_list[0]))
-    for i in tqdm(range(1, num_image)):
+    # ref_img.save(os.path.join(output_root, ref_list[0]))
+    # If use test view as ref, start from 1
+    for i in tqdm(range(0, num_image)):
         source_img = Image.open(os.path.join(source_root, source_list[i]))
         mask_img = Image.open(os.path.join(mask_root, mask_list[i]))
         source = {"image": source_img, "mask": mask_img}
@@ -254,7 +255,8 @@ def LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root, stre
         
         
         result_img.save(os.path.join(output_root, ref_list[i]))
-  
+        
+
 def GsRender(scene, port=4455):      
     # run gaussian-splatting w/ strength 0.25
     base_env = os.environ.copy()
@@ -315,7 +317,7 @@ if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
     argparser.add_argument('--dataset', '-d', type=str, default='bear', help='dataset name')
     argparser.add_argument('--scene', '-s', type=str, default='bear', help='scene name')
-    argparser.add_argument('--script', type=str, choices=['benchmark', 'ours', 'sdedit'], default='ours', help='script to run')
+    argparser.add_argument('--script', type=str, choices=['benchmark', 'ours_lama_ref', 'ours_test_ref', 'sdedit'], default='ours', help='script to run')
     argparser.add_argument('--strength', type=float, default=0.5, help='strength for sdedit')
     args = argparser.parse_args()
     
@@ -328,22 +330,44 @@ if __name__ == "__main__":
     scene_name = args.scene
     
 
-    if args.script == 'ours':
+    if args.script == 'ours_lama_ref':
         #### Stage1: Leftrefill on incomplete + GS Render #####
         ref_img_path = f"./{dataset_name}/{scene_name}/00000.png"
         source_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/images_removal/"
         ref_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/images/"
         mask_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/unseen_mask/"
         # output_root = "/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/our_dataset/plant/leftrefill"
-        output_root = f"./{dataset_name}/{scene_name}/leftrefill"
+        output_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/leftrefill_lama_ref"
         if not os.path.exists(output_root):
             print("output_root not exist, create one")
             os.makedirs(output_root)
-        # breakpoint()
             
         LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root)
-        os.system(f"cp -r {output_root} /home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/")
+        # save the 0th image as output 0th image (cover the original output 0th image)
+        ref_img = Image.open(ref_img_path)
+        ref_list = natsorted(os.listdir(ref_root))
+        ref_img.save(os.path.join(output_root, ref_list[0]))
         
+        os.system(f"cp -r {output_root} /home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/")
+    
+    elif args.script == 'ours_test_ref':
+        #### Stage1: Leftrefill on incomplete + GS Render #####
+        if args.dataset == '360':
+            raise ValueError("360 dataset does not have ref images")
+            
+        ref_img_dir = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/test_images/"
+        ref_img_path = os.path.join(ref_img_dir, natsorted(os.listdir(ref_img_dir))[0])  # get the 1st image in the test_images
+        source_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/images_removal/"
+        ref_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/images/"
+        mask_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/unseen_mask/"
+        output_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/leftrefill_test_ref"
+        if not os.path.exists(output_root):
+            print("output_root not exist, create one")
+            os.makedirs(output_root)      
+        LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root)
+        
+        
+    
     elif args.script == 'benchmark':
         #### Stage1: Leftrefill on incomplete + GS Render #####
         ref_img_path = f"./{dataset_name}/{scene_name}/00000.png"
@@ -355,10 +379,12 @@ if __name__ == "__main__":
             print("output_root not exist, create one")
             os.makedirs(output_root)
         LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root)
+        
    
     elif args.script == 'sdedit':
         strength = args.strength
-        ref_img_path = f"./{dataset_name}/{scene_name}/00000.png"
+        ref_img_dir = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/test_images/"
+        ref_img_path = os.path.join(ref_img_dir, natsorted(os.listdir(ref_img_dir))[0])  # get the 1st image in the test_images
         source_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/{dataset_name}/{scene_name}/exp1/train/ours_10000_object_inpaint/renders/"
         ref_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/images/"
         mask_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/unseen_mask/"
@@ -367,7 +393,11 @@ if __name__ == "__main__":
             print("output_root not exist, create one")
             os.makedirs(output_root)
         LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root, strength)
-        # GsRender_strength(scene=scene_name, port=4773)
+        # save the 0th image as ref image
+        ref_img = Image.open(ref_img_path)
+        ref_list = natsorted(os.listdir(ref_root))
+        ref_img.save(os.path.join(output_root, ref_list[0]))
+        
     exit()
     # #################### Bear ####################
     # #### Stage1: Leftrefill on incomplete + GS Render #####
