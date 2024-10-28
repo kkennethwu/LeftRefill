@@ -385,18 +385,18 @@ if __name__ == "__main__":
         strength = args.strength
         ref_img_dir = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/test_images/"
         ref_img_path = os.path.join(ref_img_dir, natsorted(os.listdir(ref_img_dir))[0])  # get the 1st image in the test_images
-        source_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/{dataset_name}/{scene_name}/exp1/train/ours_10000_object_inpaint/renders/"
+        source_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/output/{dataset_name}/{scene_name}/exp1/test_ref/train/ours_10000_object_inpaint/renders/"
         ref_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/images/"
         mask_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/unseen_mask/"
-        output_root = f"./home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/leftrefill_{strength}/"
+        output_root = f"/home_nfs/kkennethwu_nldap/2d-gaussian-splatting/data/{dataset_name}/{scene_name}/sdedit_{strength}/"
         if not os.path.exists(output_root):
             print("output_root not exist, create one")
             os.makedirs(output_root)
         LeftRefill(ref_img_path, source_root, ref_root, mask_root, output_root, strength)
-        # save the 0th image as ref image
-        ref_img = Image.open(ref_img_path)
-        ref_list = natsorted(os.listdir(ref_root))
-        ref_img.save(os.path.join(output_root, ref_list[0]))
+        # # save the 0th image as ref image
+        # ref_img = Image.open(ref_img_path)
+        # ref_list = natsorted(os.listdir(ref_root))
+        # ref_img.save(os.path.join(output_root, ref_list[0]))
         
     exit()
     # #################### Bear ####################
